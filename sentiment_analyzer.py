@@ -1,26 +1,24 @@
+# sentiment_analyzer.py
+# Import necessary libraries
 import os
 import openai
 from typing import Optional, Literal
 
-# Initialize the OpenAI client
-# It's good practice to initialize it once if your application runs continuously,
-# but for a standalone function, initializing inside or outside is fine.
-# The client will automatically pick up the OPENAI_API_KEY environment variable.
 try:
     client = openai.OpenAI()
 except openai.OpenAIError as e:
     print(f"Error initializing OpenAI client: {e}")
     print("Please ensure your OPENAI_API_KEY environment variable is set correctly.")
-    client = None # Or handle as a fatal error depending on your app's needs
+    client = None 
 
-Sentiment = Literal["positive", "negative", "neutral", "error"] # Added neutral and error for robustness
+Sentiment = Literal["positive", "negative", "neutral", "error"] 
 
 def analyze_news_sentiment(
     title: str,
     description: str,
     image_url: Optional[str] = None, # Included as per your spec, though not directly used for text sentiment
     link: Optional[str] = None,       # Included as per your spec, though not directly used for text sentiment
-    model: str = "gpt-3.5-turbo" # You can switch to "gpt-4-turbo-preview" or other models
+    model: str = "gpt-4" 
 ) -> Sentiment:
     """
     Analyzes the sentiment of a news item using the OpenAI API.
@@ -41,8 +39,6 @@ def analyze_news_sentiment(
         return "error"
 
     if not title and not description:
-        # If both title and description are empty, it's hard to determine sentiment.
-        # You might decide to return "neutral" or raise an error.
         print("Warning: Title and description are both empty. Returning 'neutral'.")
         return "neutral"
 
