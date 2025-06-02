@@ -1,84 +1,118 @@
 # sentiment_analyzer.py
 # Import necessary libraries
 import os
-import openai
+from dotenv import load_dotenv
+import google.generativeai as genai
 from typing import Optional, Literal
+from pathlib import Path
 
-try:
-    client = openai.OpenAI()
-except openai.OpenAIError as e:
-    print(f"Error initializing OpenAI client: {e}")
-    print("Please ensure your OPENAI_API_KEY environment variable is set correctly.")
-    client = None 
+# Get the absolute path to the .env file
+env_path = Path('.') / '.env'
+print(f"Looking for .env file at: {env_path.absolute()}")
 
-Sentiment = Literal["positive", "negative", "neutral", "error"] 
+# Load environment variables from .env file
+load_dotenv(dotenv_path=env_path)
+
+# Set API key directly (for testing)
+os.environ["GEMINI_API_KEY"] = "AIzaSyDjvgh9y0adcP8KS9ROor7YEIt2KcaZM8w"  # Replace with your actual API key
+
+# Configure Gemini API Key
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+IS_GEMINI_CONFIGURED = False
+
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        IS_GEMINI_CONFIGURED = True
+        # print("Gemini API key configured successfully.")
+    except Exception as e: # Broad exception for configuration issues
+        print(f"Error configuring Gemini API: {e}")
+        print("Please ensure your GEMINI_API_KEY is correct and valid.")
+else:
+    print("Warning: GEMINI_API_KEY environment variable not set. Sentiment analysis will not function.")
+
+Sentiment = Literal["positive", "negative", "neutral", "error"]
 
 def analyze_news_sentiment(
     title: str,
     description: str,
-    image_url: Optional[str] = None, # Included as per your spec, though not directly used for text sentiment
-    link: Optional[str] = None,       # Included as per your spec, though not directly used for text sentiment
-    model: str = "gpt-4" 
+    image_url: Optional[str] = None,
+    link: Optional[str] = None,
+    model_name: str = "gemini-1.5-flash"  # Updated to use the recommended model
 ) -> Sentiment:
     """
-    Analyzes the sentiment of a news item using the OpenAI API.
+    Analyzes the sentiment of a news item using the Google Gemini API.
 
     Args:
         title (str): The title of the news item.
         description (str): The description or snippet of the news item.
         image_url (Optional[str]): The URL of an associated image (currently not used for sentiment).
         link (Optional[str]): The URL of the news item (currently not used for sentiment).
-        model (str): The OpenAI model to use for the analysis.
+        model_name (str): The Gemini model to use for the analysis.
 
     Returns:
         Sentiment: "positive", "negative", "neutral" (if model is unsure or content is neutral),
                    or "error" if an API call fails or an unexpected issue occurs.
     """
-    if not client:
-        print("OpenAI client not initialized. Cannot perform sentiment analysis.")
+    if not IS_GEMINI_CONFIGURED:
+        print("Gemini API not configured. Cannot perform sentiment analysis.")
         return "error"
 
     if not title and not description:
         print("Warning: Title and description are both empty. Returning 'neutral'.")
         return "neutral"
 
-    # Combine title and description for a more comprehensive analysis.
-    # Prioritize description if available, as it usually contains more context.
     content_to_analyze = ""
     if description:
         content_to_analyze += f"Description: {description}\n"
-    if title: # Add title, even if description is present, for full context.
+    if title:
         content_to_analyze += f"Title: {title}"
-
-    # If only title is present
     if not description and title:
         content_to_analyze = f"Title: {title}"
-    
-    # System prompt to guide the AI
-    system_prompt = (
+
+    # Combined prompt for Gemini
+    full_prompt = (
         "You are a sentiment analysis assistant. "
         "Analyze the sentiment of the provided news item (title and/or description). "
         "Classify it as 'positive', 'negative', or 'neutral'. "
-        "Respond with ONLY one of these three words, without any additional explanation or punctuation."
+        "Respond with ONLY one of these three words, without any additional explanation or punctuation.\n\n"
+        f"News Content:\n{content_to_analyze.strip()}\n\nSentiment:"
     )
 
-    # User prompt with the content
-    user_prompt = f"News Content:\n{content_to_analyze.strip()}\n\nSentiment:"
-
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.0,  # Low temperature for classification tasks
-            max_tokens=10,    # "positive", "negative", "neutral" are short
-            n=1,
-            stop=None
+        # List available models for debugging
+        # print("Available models:", [model.name for model in genai.list_models()])
+        
+        generative_model = genai.GenerativeModel(model_name=model_name)
+        response = generative_model.generate_content(
+            full_prompt,
+            generation_config=genai.types.GenerationConfig(
+                max_output_tokens=10,
+                temperature=0.0
+            )
         )
 
-        sentiment_text = response.choices[0].message.content.strip().lower()
+        # Robustly extract text and handle potential blocking
+        sentiment_text = ""
+        try:
+            sentiment_text = response.text.strip().lower()
+        except ValueError:
+            pass
+
+        if not sentiment_text:
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                print(f"Warning: Content generation blocked by Gemini. Reason: {response.prompt_feedback.block_reason}. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
+            else:
+                blocked_by_candidate = False
+                if response.candidates:
+                    for candidate in response.candidates:
+                        if candidate.finish_reason.name == "SAFETY":
+                            blocked_by_candidate = True
+                            print(f"Warning: Content generation blocked by Gemini due to safety settings on candidate. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
+                            break
+                if not blocked_by_candidate:
+                    print(f"Warning: Gemini returned an empty or unexpected response. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
+            return "neutral"
 
         # Validate the response
         if sentiment_text == "positive":
@@ -88,30 +122,24 @@ def analyze_news_sentiment(
         elif sentiment_text == "neutral":
             return "neutral"
         else:
-            print(f"Warning: OpenAI returned an unexpected sentiment: '{sentiment_text}'. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
-            # You might want to log this for review
-            return "neutral" # Or "error" if you want to be stricter
+            print(f"Warning: Gemini returned an unexpected sentiment: '{sentiment_text}'. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
+            return "neutral"
 
-    except openai.APIError as e:
-        print(f"OpenAI API Error: {e}")
-        return "error"
     except Exception as e:
-        print(f"An unexpected error occurred during sentiment analysis: {e}")
+        print(f"Google Gemini API Error or other exception during sentiment analysis: {e}")
         return "error"
 
 # --- Example Usage (for testing) ---
 if __name__ == "__main__":
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY environment variable not set. Please set it to run examples.")
+    if not IS_GEMINI_CONFIGURED:
+        print("Gemini API not configured. Skipping examples.")
     else:
-        print("OpenAI client initialized successfully for testing.")
-        
+        print("\n--- Running Sentiment Analysis Examples with Gemini ---")
+
         # Example 1: Positive news
         positive_news = {
             "title": "Groundbreaking Discovery Promises Cure for Major Disease",
             "description": "Scientists today announced a revolutionary breakthrough that could lead to a complete cure for a widespread ailment, bringing hope to millions worldwide.",
-            "image_url": "http://example.com/image_positive.jpg",
-            "link": "http://example.com/news_positive"
         }
         sentiment1 = analyze_news_sentiment(**positive_news)
         print(f"News 1 Sentiment: {sentiment1} (Expected: positive)")
@@ -120,8 +148,6 @@ if __name__ == "__main__":
         negative_news = {
             "title": "Global Markets Plunge Amidst Economic Uncertainty",
             "description": "Stock markets around the world experienced a sharp decline today as investors reacted to growing fears of an impending recession and geopolitical tensions.",
-            "image_url": "http://example.com/image_negative.jpg",
-            "link": "http://example.com/news_negative"
         }
         sentiment2 = analyze_news_sentiment(**negative_news)
         print(f"News 2 Sentiment: {sentiment2} (Expected: negative)")
@@ -130,16 +156,14 @@ if __name__ == "__main__":
         neutral_news = {
             "title": "City Council Announces New Public Transportation Schedule",
             "description": "The city council has released an updated schedule for public bus routes, effective next Monday. Commuters are advised to check the new timings.",
-            "image_url": "http://example.com/image_neutral.jpg",
-            "link": "http://example.com/news_neutral"
         }
         sentiment3 = analyze_news_sentiment(**neutral_news)
-        print(f"News 3 Sentiment: {sentiment3} (Expected: neutral or positive/negative depending on interpretation)")
-        
+        print(f"News 3 Sentiment: {sentiment3} (Expected: neutral)")
+
         # Example 4: Only title
         title_only_news = {
             "title": "Company Reports Record Profits This Quarter",
-            "description": "", # Empty description
+            "description": "",
         }
         sentiment4 = analyze_news_sentiment(**title_only_news)
         print(f"News 4 (Title Only) Sentiment: {sentiment4} (Expected: positive)")
@@ -151,7 +175,7 @@ if __name__ == "__main__":
         }
         sentiment5 = analyze_news_sentiment(**ambiguous_news)
         print(f"News 5 (Ambiguous/Negative) Sentiment: {sentiment5} (Expected: negative)")
-        
+
         # Example 6: Potentially positive but could be neutral
         tech_update_news = {
             "title": "New Smartphone Model Unveiled with Enhanced Camera Features",
@@ -159,3 +183,8 @@ if __name__ == "__main__":
         }
         sentiment6 = analyze_news_sentiment(**tech_update_news)
         print(f"News 6 Sentiment: {sentiment6} (Expected: positive or neutral)")
+
+        # Example 7: Empty input
+        empty_news = {"title": "", "description": ""}
+        sentiment7 = analyze_news_sentiment(**empty_news)
+        print(f"News 7 (Empty) Sentiment: {sentiment7} (Expected: neutral)")

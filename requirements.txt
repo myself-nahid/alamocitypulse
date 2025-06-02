@@ -1,1 +1,3 @@
-openai
+# openai
+google-generativeai
+python-dotenv
