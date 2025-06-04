@@ -6,9 +6,9 @@ __pycache__/
 
 # Virtual Environment
 venv/
-env/
+env
 .venv/
-.env/
+.env
 
 # Distribution / packaging
 *.egg
