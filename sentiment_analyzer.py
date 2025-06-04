@@ -1,190 +1,176 @@
-# sentiment_analyzer.py
-# Import necessary libraries
 import os
+import logging
+from openai import OpenAI
 from dotenv import load_dotenv
-import google.generativeai as genai
-from typing import Optional, Literal
-from pathlib import Path
-
-# Get the absolute path to the .env file
-env_path = Path('.') / '.env'
-print(f"Looking for .env file at: {env_path.absolute()}")
 
 # Load environment variables from .env file
-load_dotenv(dotenv_path=env_path)
+load_dotenv()
 
-# Set API key directly (for testing)
-os.environ["GEMINI_API_KEY"] = "AIzaSyDjvgh9y0adcP8KS9ROor7YEIt2KcaZM8w"  # Replace with your actual API key
+OPENAI_API_KEY=os.getenv("OPENAI_API_KEY")
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY   # use your own API key
+if not os.getenv("OPENAI_API_KEY"):
+    print("Error: OPENAI_API_KEY environment variable not set.")
+    exit()
 
-# Configure Gemini API Key
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-IS_GEMINI_CONFIGURED = False
+client = OpenAI() # Will now use OPENAI_API_KEY from .env file
 
-if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        IS_GEMINI_CONFIGURED = True
-        # print("Gemini API key configured successfully.")
-    except Exception as e: # Broad exception for configuration issues
-        print(f"Error configuring Gemini API: {e}")
-        print("Please ensure your GEMINI_API_KEY is correct and valid.")
-else:
-    print("Warning: GEMINI_API_KEY environment variable not set. Sentiment analysis will not function.")
+# Configure basic logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-Sentiment = Literal["positive", "negative", "neutral", "error"]
-
-def analyze_news_sentiment(
-    title: str,
-    description: str,
-    image_url: Optional[str] = None,
-    link: Optional[str] = None,
-    model_name: str = "gemini-1.5-flash"  # Updated to use the recommended model
-) -> Sentiment:
+# --- Helper Function for OpenAI API Call ---
+def get_openai_sentiment(text_content: str, model: str = "gpt-4o-mini", temperature: float = 0.1) -> str:
     """
-    Analyzes the sentiment of a news item using the Google Gemini API.
+    Calls the OpenAI API to get sentiment for the given text.
 
     Args:
-        title (str): The title of the news item.
-        description (str): The description or snippet of the news item.
-        image_url (Optional[str]): The URL of an associated image (currently not used for sentiment).
-        link (Optional[str]): The URL of the news item (currently not used for sentiment).
-        model_name (str): The Gemini model to use for the analysis.
+        text_content (str): The text to analyze.
+        model (str): The OpenAI model to use.
+        temperature (float): The sampling temperature for the model.
 
     Returns:
-        Sentiment: "positive", "negative", "neutral" (if model is unsure or content is neutral),
-                   or "error" if an API call fails or an unexpected issue occurs.
+        str: "positive", "negative", or "neutral" (as a fallback if parsing fails).
     """
-    if not IS_GEMINI_CONFIGURED:
-        print("Gemini API not configured. Cannot perform sentiment analysis.")
-        return "error"
+    if not text_content or text_content.isspace():
+        logging.warning("Received empty text_content for sentiment analysis.")
+        return "neutral" # Cannot determine sentiment for empty text
 
-    if not title and not description:
-        print("Warning: Title and description are both empty. Returning 'neutral'.")
-        return "neutral"
-
-    content_to_analyze = ""
-    if description:
-        content_to_analyze += f"Description: {description}\n"
-    if title:
-        content_to_analyze += f"Title: {title}"
-    if not description and title:
-        content_to_analyze = f"Title: {title}"
-
-    # Combined prompt for Gemini
-    full_prompt = (
-        "You are a sentiment analysis assistant. "
-        "Analyze the sentiment of the provided news item (title and/or description). "
-        "Classify it as 'positive', 'negative', or 'neutral'. "
-        "Respond with ONLY one of these three words, without any additional explanation or punctuation.\n\n"
-        f"News Content:\n{content_to_analyze.strip()}\n\nSentiment:"
+    system_prompt = (
+        "You are a sentiment analysis expert. Your task is to classify the sentiment "
+        "of the provided news article content as either 'positive' or 'negative'. "
+        "Consider the overall emotional tone and impact of the news. "
+        "Respond with ONLY the word 'positive' or 'negative'."
     )
 
     try:
-        # List available models for debugging
-        # print("Available models:", [model.name for model in genai.list_models()])
-        
-        generative_model = genai.GenerativeModel(model_name=model_name)
-        response = generative_model.generate_content(
-            full_prompt,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=10,
-                temperature=0.0
-            )
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text_content}
+            ],
+            temperature=temperature,
+            max_tokens=10  # "positive" or "negative" is short
         )
+        sentiment = completion.choices[0].message.content.strip().lower()
 
-        # Robustly extract text and handle potential blocking
-        sentiment_text = ""
-        try:
-            sentiment_text = response.text.strip().lower()
-        except ValueError:
-            pass
-
-        if not sentiment_text:
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                print(f"Warning: Content generation blocked by Gemini. Reason: {response.prompt_feedback.block_reason}. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
-            else:
-                blocked_by_candidate = False
-                if response.candidates:
-                    for candidate in response.candidates:
-                        if candidate.finish_reason.name == "SAFETY":
-                            blocked_by_candidate = True
-                            print(f"Warning: Content generation blocked by Gemini due to safety settings on candidate. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
-                            break
-                if not blocked_by_candidate:
-                    print(f"Warning: Gemini returned an empty or unexpected response. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
-            return "neutral"
-
-        # Validate the response
-        if sentiment_text == "positive":
-            return "positive"
-        elif sentiment_text == "negative":
-            return "negative"
-        elif sentiment_text == "neutral":
-            return "neutral"
+        if sentiment in ["positive", "negative"]:
+            return sentiment
         else:
-            print(f"Warning: Gemini returned an unexpected sentiment: '{sentiment_text}'. Input: '{content_to_analyze[:100]}...'. Defaulting to neutral.")
-            return "neutral"
+            # This case handles if the model returns something unexpected
+            logging.warning(f"OpenAI returned an unexpected sentiment: '{sentiment}'. Input: '{text_content[:100]}...'")
+            
+            if "positive" in sentiment: return "positive" # Basic guard
+            if "negative" in sentiment: return "negative" # Basic guard
+            return "neutral" # Fallback if not strictly "positive" or "negative"
 
     except Exception as e:
-        print(f"Google Gemini API Error or other exception during sentiment analysis: {e}")
+        logging.error(f"Error calling OpenAI API for sentiment: {e}")
+        return "error" # Indicates an API call or processing error
+
+# --- Main Sentiment Analysis Function ---
+def analyze_news_item_sentiment(news_data: dict) -> str:
+    """
+    Analyzes the sentiment of a news item based on its fields.
+
+    Args:
+        news_data (dict): A dictionary containing news item fields:
+            'Category' (str, optional)
+            'URL' (str, optional but good for logging)
+            'Headline' (str)
+            'Image' (str, optional)
+            'Description' (str, optional)
+            'Published Datetime' (str, optional)
+            'Published Text' (str, optional) - This field from your example seems to be
+                                            just a formatted datetime, not the article body.
+                                            If it *were* the full article text, it would be primary.
+
+    Returns:
+        str: The predicted sentiment ("positive", "negative", "neutral" or "error").
+    """
+    if not isinstance(news_data, dict):
+        logging.error("Invalid input: news_data must be a dictionary.")
         return "error"
 
-# --- Example Usage (for testing) ---
+    headline = news_data.get("Headline", "")
+    description = news_data.get("Description", "")
+    
+    text_for_analysis = []
+    if headline:
+        text_for_analysis.append(f"Headline: {headline}")
+    if description:
+        # Limit description length if it's extremely long to manage token usage
+        # For GPT-3.5-turbo, context window is ~4k tokens, GPT-4 ~8k or ~32k.
+        # A typical word is ~1.3 tokens.
+        max_desc_chars = 3000 # Approx 750 words / 1000 tokens, adjustable
+        truncated_description = description[:max_desc_chars]
+        if len(description) > max_desc_chars:
+            truncated_description += "..."
+        text_for_analysis.append(f"Description: {truncated_description}")
+
+    if not text_for_analysis:
+        logging.warning(f"No text content (headline/description) found for sentiment analysis. URL: {news_data.get('URL', 'N/A')}")
+        return "neutral" # Or "error" depending on how you want to handle this
+
+    combined_text = "\n\n".join(text_for_analysis)
+
+    logging.info(f"Analyzing sentiment for URL: {news_data.get('URL', 'N/A')}")
+    sentiment = get_openai_sentiment(combined_text)
+    logging.info(f"Predicted sentiment: {sentiment} for URL: {news_data.get('URL', 'N/A')}")
+
+    return sentiment
+
+# --- Example Usage with your provided data ---
 if __name__ == "__main__":
-    if not IS_GEMINI_CONFIGURED:
-        print("Gemini API not configured. Skipping examples.")
-    else:
-        print("\n--- Running Sentiment Analysis Examples with Gemini ---")
+    # Ensure your OPENAI_API_KEY is set in your environment
+    if not os.getenv("OPENAI_API_KEY"):
+        print("Error: OPENAI_API_KEY environment variable not set.")
+        print("Please set it before running the script, e.g.:")
+        print("export OPENAI_API_KEY='your_key_here'")
+        exit()
 
-        # Example 1: Positive news
-        positive_news = {
-            "title": "Groundbreaking Discovery Promises Cure for Major Disease",
-            "description": "Scientists today announced a revolutionary breakthrough that could lead to a complete cure for a widespread ailment, bringing hope to millions worldwide.",
+    sample_news_items = [
+        {
+            "Category": "News",
+            "URL": "https://www.ksat.com/sports/2013/08/27/download-the-big-game-coverage-app-from-ksat/",
+            "Headline": "Download KSAT's Big Game Coverage App to get real-time scores, highlights, schedules and eSports",
+            "Image": "https://res.cloudinary.com/...",
+            "Description": "Kolten Parker, Manager of Content and Coverage Published:August 27, 2013 at 2:05 PM Updated:August 30, 2024 at 2:35 PM Kolten Parker, Manager of Content and Coverage Downloading the BGC app in theApple StoreorGoogle Play Storeis the best way to get all Big Game Coverage from KSAT 12 sports — including watching highlights, reading insider analysis and more. This year, we've completely redesigned the app to make it easier to find the latest content. Recommended Videos This is a modal window. Begin...",
+            "Published Datetime": "2013-08-27T19:05:33.000Z",
+            "Published Text": "August 27, 2013 at 2:05 PM"
+        },
+        {
+            "Category": "News",
+            "URL": "https://www.ksat.com/news/local/2025/06/03/crash-closes-lanes-on-se-loop-410-on-south-side-drivers-urged-to-use-alternate-route-txdot-says/",
+            "Headline": "Crash closes lanes on SE Loop 410 on South Side; drivers urged to use alternate route, TxDOT says",
+            "Image": "https://res.cloudinary.com/...",
+            "Description": "Ryan Cerna, Digital News Trainee Published:June 2, 2025 at 8:58 PM Ryan Cerna, Digital News Trainee SAN ANTONIO– Traffic is being diverted off Southeast Loop 410 at the Villamain Road exit due to a crash, TxDOT traffic cameras show. The crash was confirmed shortly before 7:45 p.m. at Loop 410 West at Moursund Boulevard, TxDOT said. All lanes are blocked and drivers are urged to use an alternate route. Recommended Videos This is a modal window. Beginning of dialog window. Escape will cancel and c...",
+            "Published Datetime": "2025-06-03T01:58:02.333Z",
+            "Published Text": "June 2, 2025 at 8:58 PM"
+        },
+        {
+            "Category": "Sports",
+            "URL": "https://www.ksat.com/sports/big-game-coverage/2025/04/25/brennans-javonte-johnson-commits-to-western-texas-college/",
+            "Headline": "Brennan's Javonte Johnson commits to Western Texas College",
+            "Image": "https://res.cloudinary.com/...",
+            "Description": "Nick Mantas, Sports Editor Published:April 24, 2025 at 8:40 PM Nick Mantas, Sports Editor SAN ANTONIO– Brennan basketball star Javonte Johnson announced his commitment to Western Texas College on social media Wednesday. The 6-foot-5 guard helped Brennan reach the 6A state semifinal round this past season. Read more reporting and watch highlights and full games on theBig Game Coverage page. More Stories Like This In Our Email Newsletter Read also: Copyright 2025 by KSAT - All rights reserved. Nic...",
+            "Published Datetime": "2025-04-25T01:40:33.105Z",
+            "Published Text": "April 24, 2025 at 8:40 PM"
+        },
+        {
+            "Category": "News",
+            "URL": "https://www.ksat.com/station/2020/12/22/fcc-applications/",
+            "Headline": "FCC Applications",
+            "Image": "https://res.cloudinary.com/...",
+            "Description": "Published:December 22, 2020 at 12:20 PM Updated:April 16, 2025 at 11:19 AM KSAT ATSC 1.0 Host Exhibit (for 3.0 Deployment) (Amended 2-22-24) (1)byJulie Morenoon Scribd KSAT Email Newsletters KSAT RSS Feeds Contests and Rules Contact Us KSAT Internships Careers at KSAT Closed Captioning / Audio Description Public File Current EEO Report Terms of Use Privacy Policy Do Not Sell My Info FCC Applications Cookie Preferences If you need help with the Public File, call(210) 351-1200 At KSAT, we are comm...",
+            "Published Datetime": "2020-12-22T18:20:10.197Z",
+            "Published Text": "December 22, 2020 at 12:20 PM"
         }
-        sentiment1 = analyze_news_sentiment(**positive_news)
-        print(f"News 1 Sentiment: {sentiment1} (Expected: positive)")
+    ]
 
-        # Example 2: Negative news
-        negative_news = {
-            "title": "Global Markets Plunge Amidst Economic Uncertainty",
-            "description": "Stock markets around the world experienced a sharp decline today as investors reacted to growing fears of an impending recession and geopolitical tensions.",
-        }
-        sentiment2 = analyze_news_sentiment(**negative_news)
-        print(f"News 2 Sentiment: {sentiment2} (Expected: negative)")
-
-        # Example 3: Neutral news / Factual update
-        neutral_news = {
-            "title": "City Council Announces New Public Transportation Schedule",
-            "description": "The city council has released an updated schedule for public bus routes, effective next Monday. Commuters are advised to check the new timings.",
-        }
-        sentiment3 = analyze_news_sentiment(**neutral_news)
-        print(f"News 3 Sentiment: {sentiment3} (Expected: neutral)")
-
-        # Example 4: Only title
-        title_only_news = {
-            "title": "Company Reports Record Profits This Quarter",
-            "description": "",
-        }
-        sentiment4 = analyze_news_sentiment(**title_only_news)
-        print(f"News 4 (Title Only) Sentiment: {sentiment4} (Expected: positive)")
-
-        # Example 5: Ambiguous/Slightly Negative title
-        ambiguous_news = {
-            "title": "Tech Giant Faces Scrutiny Over Data Privacy Practices",
-            "description": "Regulators are launching an investigation into how the company handles user data, raising concerns among privacy advocates.",
-        }
-        sentiment5 = analyze_news_sentiment(**ambiguous_news)
-        print(f"News 5 (Ambiguous/Negative) Sentiment: {sentiment5} (Expected: negative)")
-
-        # Example 6: Potentially positive but could be neutral
-        tech_update_news = {
-            "title": "New Smartphone Model Unveiled with Enhanced Camera Features",
-            "description": "The latest iteration of the popular smartphone boasts an upgraded camera system and faster processing speeds, available for pre-order next week."
-        }
-        sentiment6 = analyze_news_sentiment(**tech_update_news)
-        print(f"News 6 Sentiment: {sentiment6} (Expected: positive or neutral)")
-
-        # Example 7: Empty input
-        empty_news = {"title": "", "description": ""}
-        sentiment7 = analyze_news_sentiment(**empty_news)
-        print(f"News 7 (Empty) Sentiment: {sentiment7} (Expected: neutral)")
+    for i, item in enumerate(sample_news_items):
+        print(f"\n--- Analyzing Item {i+1} ---")
+        print(f"Headline: {item.get('Headline')}")
+        sentiment = analyze_news_item_sentiment(item)
+        print(f"Predicted Sentiment: {sentiment}")
+        
